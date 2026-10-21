@@ -70,10 +70,26 @@ inventory_packages() {
         [[ $status == installed ]] || continue
         base=${package%%:*}
         if [[ $base =~ ^php([0-9]+\.[0-9]+)?(-|$) || $base =~ ^libapache2-mod-php ]]; then
+            # Default-version metapackages may pull a different PHP branch.
+            [[ $source != php-defaults ]] || continue
             PACKAGES+=("$package")
             printf '  %s %s\n' "$package" "$version"
         fi
     done < "$WORKDIR/packages.tsv"
+}
+
+validate_plan() {
+    local action package rest branch
+    while read -r action package rest; do
+        [[ $action == Inst ]] || continue
+        if [[ $package =~ ^(php|libapache2-mod-php)([0-9]+\.[0-9]+) ]]; then
+            branch=${BASH_REMATCH[2]}
+            if ! awk -F '\t' -v source="php$branch" '$1 == "installed" && $4 == source { found=1 } END { exit !found }' "$WORKDIR/packages.tsv"; then
+                say "[拒绝计划] $package 会引入未安装的 PHP $branch 分支。" >&2
+                return 1
+            fi
+        fi
+    done < "$WORKDIR/apt-plan.txt"
 }
 
 verify_packages() {
@@ -255,6 +271,7 @@ main() {
         apt-get -o APT::Update::Error-Mode=any update
         apt-get -s --only-upgrade --no-remove install -- "${PACKAGES[@]}" > "$WORKDIR/apt-plan.txt"
         cat "$WORKDIR/apt-plan.txt"
+        validate_plan || die '升级计划包含新 PHP 分支，请检查软件源和依赖后重试。'
         DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
             apt-get -y --only-upgrade --no-remove -o Dpkg::Options::=--force-confold install -- "${PACKAGES[@]}"
         inventory_packages

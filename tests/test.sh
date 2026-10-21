@@ -90,6 +90,13 @@ expect 0 managed_php_file /usr/bin/php8.3
 expect 1 managed_php_file /usr/local/bin/php
 expect 1 managed_php_file '/usr/bin/php*'
 
+printf 'Inst php8.3-fpm [8.3.35] (8.3.36 repo)\n' > "$WORKDIR/apt-plan.txt"
+expect 0 validate_plan
+printf 'Inst php8.4-common (8.4.27 repo)\n' > "$WORKDIR/apt-plan.txt"
+expect 1 validate_plan
+printf 'Inst libapache2-mod-php8.5 (8.5.12 repo)\n' > "$WORKDIR/apt-plan.txt"
+expect 1 validate_plan
+
 systemctl() {
     [[ $1 == list-units ]] || { printf 'Unexpected mutating systemctl in test\n' >&2; return 1; }
     printf 'php8.3-fpm.service loaded active running PHP\nnginx.service loaded active running nginx\n'
