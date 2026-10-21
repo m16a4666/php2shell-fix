@@ -198,7 +198,7 @@ p2_main() {
             p2_check_file "$path" "$branch"
         done
     done
-    p2_scan_processes
+    p2_scan_processes /proc
     p2_containers
     # Recheck every file after process inventory to catch concurrent replacement.
     for real in "${!P2_STATUS[@]}"; do
