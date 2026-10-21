@@ -11,3 +11,4 @@ jobs:
       - run: shellcheck *.sh tests/*.sh
       - run: bash tests/test.sh
       - run: bash tests/test-bt.sh
+      - run: bash tests/test-check.sh
