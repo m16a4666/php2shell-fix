@@ -7,6 +7,7 @@ umask 077
 
 BT_ROOT=/www/server/php/82
 BT_INIT=/etc/init.d/php-fpm-82
+BT_FPM_REAL=$BT_ROOT/sbin/php-fpm
 BT_VENDOR_URL=https://download.bt.cn/install/0/php.sh
 # Reviewed 2026-10-21: update preserves php.ini/FPM config, uses PHP 8.2.35.
 BT_VENDOR_SHA=63135389a18588fb6f096e2584e6f8e49797247f1e14c8acc56ea0fd924db02f
@@ -53,7 +54,7 @@ bt_pids() {
     local proc exe
     for proc in /proc/[0-9]*; do
         exe=$(readlink "$proc/exe" 2>/dev/null) || continue
-        if [[ $exe == "$BT_ROOT/sbin/php-fpm" || $exe == "$BT_ROOT/sbin/php-fpm (deleted)" ]]; then
+        if [[ $exe == "$BT_FPM_REAL" || $exe == "$BT_FPM_REAL (deleted)" ]]; then
             printf '%s\n' "${proc##*/}"
         fi
     done
@@ -98,6 +99,8 @@ bt_main() {
         -f /www/server/panel/install/public.sh ]] || bt_die '不是已识别的标准宝塔安装，停止。'
     [[ -x $BT_ROOT/bin/php && -x $BT_ROOT/sbin/php-fpm && -x $BT_INIT ]] || bt_die '缺少 PHP 8.2 二进制或标准启动脚本。'
     [[ ! -L $BT_ROOT ]] || bt_die 'PHP 8.2 目录是符号链接，需单独确定备份和更新目标。'
+    [[ ! -L $BT_ROOT/sbin/php-fpm && ! -L $BT_ROOT/bin/php ]] || bt_die 'PHP 二进制是符号链接，需单独确定更新目标。'
+    BT_FPM_REAL=$(readlink -f "$BT_ROOT/sbin/php-fpm") || bt_die '无法确定 FPM 实际路径。'
     local cmd cli fpm vendor pids path size free_log free_php old_pid old_exe missing
     for cmd in curl sha256sum tar flock timeout awk sort comm du df tee; do
         command -v "$cmd" >/dev/null || bt_die "缺少依赖：$cmd"
@@ -168,7 +171,7 @@ bt_main() {
         while IFS= read -r old_pid; do
             [[ -n $old_pid ]] || continue
             old_exe=$(readlink "/proc/$old_pid/exe" 2>/dev/null) || continue
-            [[ $old_exe != "$BT_ROOT/sbin/php-fpm" && $old_exe != "$BT_ROOT/sbin/php-fpm (deleted)" ]] ||
+            [[ $old_exe != "$BT_FPM_REAL" && $old_exe != "$BT_FPM_REAL (deleted)" ]] ||
                 bt_die "原有 FPM PID $old_pid 仍存活，请核验启动脚本。"
         done < "$BT_WORK/pids-before.txt"
     else
