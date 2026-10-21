@@ -1,0 +1,12 @@
+name: Script checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n fix-php2shell.sh tests/test.sh
+      - run: shellcheck fix-php2shell.sh tests/test.sh
+      - run: bash tests/test.sh
