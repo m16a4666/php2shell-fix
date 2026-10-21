@@ -144,6 +144,7 @@ discover_services() {
 
 inventory_extra() {
     local path runtime listing proc exe name lib cg unit seen=0
+    local -A unmanaged_counts=()
     shopt -s nullglob
     # Bounded checks: no full disk traversal and no execution of discovered binaries.
     for path in /usr/local/bin/php* /usr/local/sbin/php-fpm* /opt/*/bin/php* \
@@ -165,7 +166,15 @@ inventory_extra() {
             pending "无法盘点 $runtime 容器。"
         fi
     done
-    for runtime in crictl lxc-ls machinectl snap; do
+    if command -v snap >/dev/null 2>&1; then
+        if listing=$(timeout 20 snap list 2>/dev/null); then
+            listing=$(awk 'NR > 1 && $1 !~ /^(bare|core[0-9]*|snapd)$/ {print $1}' <<< "$listing")
+            [[ -z $listing ]] || pending "Snap 应用需单独核验 PHP（非直接认定存在漏洞）：$listing"
+        else
+            pending '无法列出 Snap 应用；仅安装 snap 命令不能证明有 PHP。'
+        fi
+    fi
+    for runtime in crictl lxc-ls machinectl; do
         if command -v "$runtime" >/dev/null 2>&1; then
             pending "检测到 $runtime：其中的 PHP 不属于本次 apt 修复范围，请单独核验。"
         fi
@@ -176,7 +185,7 @@ inventory_extra() {
         name=${exe##*/}
         if [[ $name =~ ^(php([0-9.]+)?|php-fpm([0-9.]+)?|php-cgi([0-9.]+)?|lsphp.*|frankenphp.*|caddy)(\ \(deleted\))?$ ]]; then
             if ! managed_php_file "$exe"; then
-                pending "PID ${proc##*/} 非受支持的 PHP/嵌入式运行时候选：$exe"
+                unmanaged_counts["$exe"]=$(( ${unmanaged_counts["$exe"]:-0} + 1 ))
             else
                 seen=1
                 cg=$(cat "$proc/cgroup" 2>/dev/null) || { pending "无法读取 PID ${proc##*/} cgroup"; continue; }
@@ -203,6 +212,9 @@ inventory_extra() {
                 fi
             fi
         done < <(awk '/\/libphp[^/ ]*\.so/ { sub(/^[^/]*\//, "/"); print }' "$proc/maps" 2>/dev/null)
+    done
+    for exe in "${!unmanaged_counts[@]}"; do
+        pending "非受支持的 PHP/嵌入式运行时候选：$exe（${unmanaged_counts["$exe"]} 个进程，合并显示）"
     done
     if (( seen == 0 )); then
         say '[范围提示] 未识别到受支持的活动 PHP Web 进程；这不是外网站点或全部安装的安全证明。'

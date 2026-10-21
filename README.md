@@ -1,6 +1,28 @@
 # Ubuntu PHP2Shell 修复脚本
 
-针对 CVE-2026-109618 / CVE-2026-109619，更新 **Ubuntu 上 apt/dpkg 安装的 PHP** 并核验。默认只检查，传入 `--apply` 才升级。
+针对 CVE-2026-109618 / CVE-2026-109619，提供 Ubuntu apt PHP 和标准宝塔 PHP 8.2 两个独立入口。默认只检查，传入 `--apply` 才升级。
+
+## 宝塔 PHP 8.2（路径 /www/server/php/82）
+
+如果原脚本报告 `/www/server/php/82`，请使用以下专用入口；apt 更新不会更新这个目录。
+
+```bash
+(f=$(mktemp) && trap 'rm -f -- "$f"' EXIT && curl -fL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/m16a4666/php2shell-fix/main/fix-bt-php82.sh -o "$f" && sudo bash "$f" --apply)
+```
+
+脚本只更新标准宝塔 PHP **8.2**，不修改网站绑定、不跨分支安装：
+
+- 核验 Ubuntu、标准宝塔安装路径、CLI/FPM 版本、现有 FPM 配置及扩展加载情况。
+- 从宝塔官方 HTTPS 下载 `install/0/php.sh`，与本仓库已审阅版本的 SHA-256 比对，并确认目标版本至少 8.2.35；内容变化则停止，需重新核查更新。
+- 在 `/var/log/php2shell-bt82.*` 备份 PHP 8.2 目录（包含配置及扩展，排除 src 构建目录），保留升级前模块列表及 PID。
+- 调用官方脚本 **`update 8.2`**。不使用会清空目录的 `install` 操作，不使用尚未核实补丁的“极速安装”脚本。
+- 再次核验 CLI/FPM 文件版本、主配置校验和、扩展列表及 FPM 配置。原来活动的 FPM 会完整重启，原来停止的 FPM 恢复停止状态。网站在安装/重启阶段可能短暂中断；编译耗时取决于服务器性能。
+
+如编译失败且原来活动的 FPM 停止，脚本会在配置可用时尝试启动当前运行时，并仍然报未完成；不会盲目覆盖备份。**目录备份不是整机快照，官方更新器可能安装/更新系统依赖或公共库，备份不支持完整自动回滚。** 官方更新器有自己的网络下载及诊断上报行为。
+
+成功只表示这个 PHP 8.2 实例通过上述检查；其他版本、容器及实际站点功能仍需单独核验。脚本及官方更新器未在用户实际生产服务器上预先运行验证。
+
+官方编译更新脚本来源：[download.bt.cn/install/0/php.sh](https://download.bt.cn/install/0/php.sh)。截至 2026-10-21，本次审阅的脚本声明目标为 8.2.35，而 `install/1/php.sh` 仍声明 8.2.34。
 
 ## 直接运行
 
@@ -68,9 +90,10 @@ Ubuntu USN-8948-1 的回补版本也可通过：
 ## 验证
 
 ```bash
-bash -n fix-php2shell.sh tests/test.sh
-shellcheck fix-php2shell.sh tests/test.sh
+for f in *.sh tests/*.sh; do bash -n "$f"; done
+shellcheck *.sh tests/*.sh
 bash tests/test.sh
+bash tests/test-bt.sh
 ```
 
 测试覆盖修复版本边界、Ubuntu 回补、候选版/PPA 拒绝、CLI 已修复但 FPM 未修复、未安装核心包、软件包归属和服务发现。测试使用桩，不会在本机升级软件或重启服务。实际生产站点可用性仍需运行后确认。
