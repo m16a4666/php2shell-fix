@@ -12,3 +12,4 @@ jobs:
       - run: bash tests/test.sh
       - run: bash tests/test-bt.sh
       - run: bash tests/test-check.sh
+      - run: bash tests/test-lock.sh

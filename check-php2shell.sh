@@ -184,7 +184,11 @@ p2_main() {
     # Use an existing lock read-only. Do not create a lock or block a live update.
     if [[ -e /run/lock/php2shell-fix.lock ]]; then
         exec 9</run/lock/php2shell-fix.lock
-        flock -sn 9 || { p2_say '[无法确认] 修复脚本正在运行，请结束后再检查。'; return 3; }
+        if ! flock -sn 9; then
+            p2_say '[无法确认] 修复锁被占用：可能正在更新，也可能是旧版更新器的锁被服务继承。'
+            p2_say '这不是更新进程仍在运行的证明。不要杀 PHP-FPM 或删除锁文件；请检查锁持有者。'
+            return 3
+        fi
     fi
     p2_say "PHP2Shell 只读核验 | $(hostname) | $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
     p2_say '检查基线：8.2.35 / 8.3.36 / 8.4.27 / 8.5.12；不会安装、改配置或重启。'

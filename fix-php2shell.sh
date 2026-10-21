@@ -17,6 +17,10 @@ WORKDIR=''
 say() { printf '%s\n' "$*"; }
 pending() { say "[待处理] $*"; PENDING=1; }
 die() { say "[失败] $*" >&2; exit 1; }
+release_lock() {
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
+}
 on_error() {
     local rc=$1 line=$2
     printf '[失败] 行 %s，退出码 %s；修复未完成。日志：%s\n' "$line" "$rc" "$WORKDIR/run.log" >&2
@@ -257,12 +261,13 @@ main() {
     [[ ! -e /.dockerenv && ! -e /run/.containerenv ]] || die '检测到容器环境，请从宿主机更新镜像并重建容器。'
     exec 9>/run/lock/php2shell-fix.lock
     flock -n 9 || die '已有修复/检查任务正在运行。'
+    trap release_lock EXIT
     if [[ $MODE == apply ]]; then
         WORKDIR=$(mktemp -d /var/log/php2shell-fix.XXXXXXXX)
     else
         WORKDIR=$(mktemp -d /tmp/php2shell-check.XXXXXXXX)
     fi
-    exec > >(tee -a "$WORKDIR/run.log") 2>&1
+    exec > >(tee -a "$WORKDIR/run.log" 9>&-) 2>&1
     trap 'on_error "$?" "$LINENO"' ERR
     say "PHP2Shell | Ubuntu $OS_VERSION | 模式 $MODE | $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
     say "日志与记录：$WORKDIR（仅 root 可读，可能含配置敏感信息，请勿上传）"
@@ -280,19 +285,19 @@ main() {
         cp "$WORKDIR/services.txt" "$WORKDIR/services-before.txt"
         preflight_services
         say '[升级] 更新软件源并仅升级已安装 PHP 包；网站可能短暂中断。'
-        apt-get -o APT::Update::Error-Mode=any update
-        apt-get -s --only-upgrade --no-remove install -- "${PACKAGES[@]}" > "$WORKDIR/apt-plan.txt"
+        apt-get -o APT::Update::Error-Mode=any update 9>&-
+        apt-get -s --only-upgrade --no-remove install -- "${PACKAGES[@]}" > "$WORKDIR/apt-plan.txt" 9>&-
         cat "$WORKDIR/apt-plan.txt"
         validate_plan || die '升级计划包含新 PHP 分支，请检查软件源和依赖后重试。'
         DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
-            apt-get -y --only-upgrade --no-remove -o Dpkg::Options::=--force-confold install -- "${PACKAGES[@]}"
+            apt-get -y --only-upgrade --no-remove -o Dpkg::Options::=--force-confold install -- "${PACKAGES[@]}" 9>&-
         inventory_packages
         # A restart, rather than a graceful reload, replaces every old worker.
         preflight_services
         local unit
         for unit in "${SERVICES[@]}"; do
             say "[重启] $unit"
-            systemctl restart "$unit"
+            systemctl restart "$unit" 9>&-
             systemctl is-active --quiet "$unit" || die "$unit 重启后未正常运行。"
         done
         discover_services

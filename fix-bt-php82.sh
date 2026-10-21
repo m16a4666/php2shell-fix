@@ -18,6 +18,11 @@ BT_ZIP_WARNING_RE='^(PHP )?Warning:[[:space:]]+Module "zip" is already loaded in
 
 bt_say() { printf '%s\n' "$*"; }
 bt_die() { bt_say "[未完成] $*" >&2; exit 1; }
+bt_service() { "$BT_INIT" "$@" 9>&-; }
+bt_release_lock() {
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
+}
 bt_usage() {
     bt_say '用法：sudo bash fix-bt-php82.sh --apply（备份并更新宝塔 PHP 8.2）'
     bt_say '      sudo bash fix-bt-php82.sh --check（默认，仅检查文件版本）'
@@ -99,10 +104,11 @@ bt_exit() {
         pids=$(bt_pids)
         if [[ -z $pids ]] && "$BT_ROOT/sbin/php-fpm" -t >> "$BT_WORK/run.log" 2>&1; then
             bt_say '[恢复服务尝试] 更新未完成，尝试启动当前可用 FPM；这不代表漏洞已修复。'
-            "$BT_INIT" start || true
+            bt_service start || true
         fi
     fi
     if (( rc != 0 )); then bt_say "[未完成] 请查看日志/备份：${BT_WORK:-尚未创建}" >&2; fi
+    bt_release_lock
     exit "$rc"
 }
 
@@ -132,7 +138,7 @@ bt_main() {
     exec 9>/run/lock/php2shell-fix.lock
     flock -n 9 || bt_die '已有修复或检查任务正在运行。'
     BT_WORK=$(mktemp -d /var/log/php2shell-bt82.XXXXXXXX)
-    exec > >(tee -a "$BT_WORK/run.log") 2>&1
+    exec > >(tee -a "$BT_WORK/run.log" 9>&-) 2>&1
     trap 'bt_exit "$?"' EXIT
     bt_say "[记录] $BT_WORK（仅 root 可读）"
     bt_say "[系统] ${PRETTY_NAME:-${ID:-unknown}}"
@@ -176,7 +182,7 @@ bt_main() {
         done
         bt_say "[更新] 调用宝塔官方编译脚本 update 8.2，目标 $vendor；可能耗时较长，安装阶段网站会短暂中断。"
         bt_say '[进度提示] 解压后移动文件、调整权限或编译检查可能暂时无新输出。请另开 SSH 查看进程，不要并行重跑。'
-        (cd "$BT_WORK" && bash ./php-vendor.sh update 8.2) || bt_die '官方更新脚本执行失败。'
+        (exec 9>&-; cd "$BT_WORK" && bash ./php-vendor.sh update 8.2) || bt_die '官方更新脚本执行失败。'
     fi
     cli=$(bt_version "$BT_ROOT/bin/php") || bt_die '更新后 CLI 无法运行。'
     fpm=$(bt_version "$BT_ROOT/sbin/php-fpm") || bt_die '更新后 FPM 无法运行。'
@@ -191,7 +197,7 @@ bt_main() {
     [[ -z $missing ]] || bt_die "更新后缺少原有扩展：$missing"
     "$BT_ROOT/sbin/php-fpm" -t || bt_die '更新后 FPM 配置无效。'
     if (( BT_WAS_ACTIVE )); then
-        "$BT_INIT" restart || bt_die 'FPM 重启失败。'
+        bt_service restart || bt_die 'FPM 重启失败。'
         pids=$(bt_pids)
         [[ -n $pids ]] || bt_die '重启后未发现 PHP 8.2 FPM 进程。'
         while IFS= read -r old_pid; do
@@ -202,7 +208,7 @@ bt_main() {
         done < "$BT_WORK/pids-before.txt"
     else
         # The vendor update starts FPM even when it was originally stopped.
-        "$BT_INIT" stop || bt_die '无法恢复原来停止的 FPM 状态。'
+        bt_service stop || bt_die '无法恢复原来停止的 FPM 状态。'
         [[ -z $(bt_pids) ]] || bt_die '原来停止的 FPM 仍在运行。'
     fi
     bt_say "[通过] 宝塔 PHP 8.2 文件版本：CLI=$cli FPM=$fpm；原有活动 FPM 已替换，原有扩展列表通过。"
