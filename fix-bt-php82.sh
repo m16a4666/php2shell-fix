@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Standard BaoTa /www/server/php/82 installation, Ubuntu only.
+# Standard BaoTa /www/server/php/82 installation, Ubuntu and Debian.
 set -Eeuo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
@@ -14,12 +14,26 @@ BT_VENDOR_SHA=63135389a18588fb6f096e2584e6f8e49797247f1e14c8acc56ea0fd924db02f
 BT_WORK=''
 BT_WAS_ACTIVE=0
 BT_APPLY=0
+BT_ZIP_WARNING_RE='^(PHP )?Warning:[[:space:]]+Module "zip" is already loaded in Unknown on line 0$'
 
 bt_say() { printf '%s\n' "$*"; }
 bt_die() { bt_say "[未完成] $*" >&2; exit 1; }
 bt_usage() {
     bt_say '用法：sudo bash fix-bt-php82.sh --apply（备份并更新宝塔 PHP 8.2）'
     bt_say '      sudo bash fix-bt-php82.sh --check（默认，仅检查文件版本）'
+}
+bt_supported_os() {
+    case "$1/$2" in
+        ubuntu/*|debian/11|debian/12|debian/13) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+bt_diagnostics_ok() {
+    local line
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line =~ ^[[:space:]]*$ || $line =~ $BT_ZIP_WARNING_RE ]] || return 1
+    done < "$1"
+    return 0
 }
 bt_parse_version() {
     local line
@@ -63,8 +77,17 @@ bt_pids() {
 bt_modules() {
     local target=$1 errors=$2
     timeout 20 "$BT_ROOT/bin/php" -m > "$target.raw" 2> "$errors" || return 1
-    if [[ -s $errors ]]; then cat "$errors" >&2; return 1; fi
-    awk 'NF && $0 !~ /^\[/' "$target.raw" | sort -u > "$target"
+    # Some installations also display startup diagnostics on stdout.
+    awk '/^(PHP )?(Warning|Fatal error|Parse error|Deprecated|Notice):/ {print}' "$target.raw" > "$target.diagnostics"
+    if ! bt_diagnostics_ok "$errors" || ! bt_diagnostics_ok "$target.diagnostics"; then
+        cat "$errors" "$target.diagnostics" >&2
+        return 1
+    fi
+    awk -v warning="$BT_ZIP_WARNING_RE" 'NF && $0 !~ /^\[/ && $0 !~ warning' "$target.raw" | sort -u > "$target"
+    if grep -Eq "$BT_ZIP_WARNING_RE" "$errors" "$target.diagnostics"; then
+        grep -Fxq zip "$target" || { bt_say '[失败] zip 重复警告存在，但模块列表没有 zip。' >&2; return 1; }
+        bt_say '[配置提醒] zip 已正常加载；保留原有重复加载配置，继续安全更新。此提醒不代表补丁已通过。' >&2
+    fi
 }
 bt_exit() {
     local rc=$1
@@ -89,11 +112,12 @@ bt_main() {
         --apply) BT_APPLY=1 ;; --check) BT_APPLY=0 ;;
         --help|-h) bt_usage; return 0 ;; *) bt_usage; return 1 ;;
     esac
-    [[ $(uname -s) == Linux && $EUID -eq 0 ]] || bt_die '请在目标 Ubuntu 上以 root/sudo 执行。'
+    [[ $(uname -s) == Linux && $EUID -eq 0 ]] || bt_die '请在目标 Ubuntu/Debian 上以 root/sudo 执行。'
     [[ -r /etc/os-release ]] || bt_die '无法确定系统。'
     # shellcheck source=/dev/null
     . /etc/os-release
-    [[ ${ID:-} == ubuntu ]] || bt_die '本入口只支持 Ubuntu 标准宝塔 PHP 8.2。'
+    bt_supported_os "${ID:-unknown}" "${VERSION_ID:-unknown}" ||
+        bt_die "不支持 ${ID:-unknown} ${VERSION_ID:-unknown}；本入口支持 Ubuntu 和 Debian 11/12/13 的标准宝塔 PHP 8.2。"
     [[ ! -e /.dockerenv && ! -e /run/.containerenv ]] || bt_die '请在宿主机操作。'
     [[ -f /var/bt_setupPath.conf && $(cat /var/bt_setupPath.conf) == /www &&
         -f /www/server/panel/install/public.sh ]] || bt_die '不是已识别的标准宝塔安装，停止。'
@@ -102,7 +126,7 @@ bt_main() {
     [[ ! -L $BT_ROOT/sbin/php-fpm && ! -L $BT_ROOT/bin/php ]] || bt_die 'PHP 二进制是符号链接，需单独确定更新目标。'
     BT_FPM_REAL=$(readlink -f "$BT_ROOT/sbin/php-fpm") || bt_die '无法确定 FPM 实际路径。'
     local cmd cli fpm vendor pids path size free_log free_php old_pid old_exe missing
-    for cmd in curl sha256sum tar flock timeout awk sort comm du df tee; do
+    for cmd in curl sha256sum tar flock timeout awk sort comm du df tee grep; do
         command -v "$cmd" >/dev/null || bt_die "缺少依赖：$cmd"
     done
     exec 9>/run/lock/php2shell-fix.lock
@@ -111,6 +135,7 @@ bt_main() {
     exec > >(tee -a "$BT_WORK/run.log") 2>&1
     trap 'bt_exit "$?"' EXIT
     bt_say "[记录] $BT_WORK（仅 root 可读）"
+    bt_say "[系统] ${PRETTY_NAME:-${ID:-unknown}}"
     cli=$(bt_version "$BT_ROOT/bin/php") || bt_die '读取 CLI 版本失败。'
     fpm=$(bt_version "$BT_ROOT/sbin/php-fpm") || bt_die '读取 FPM 版本失败。'
     bt_say "[当前] $BT_ROOT | CLI=$cli | FPM=$fpm"
@@ -150,6 +175,7 @@ bt_main() {
             [[ ! -f $path ]] || sha256sum "$path" >> "$BT_WORK/config-before.sha256"
         done
         bt_say "[更新] 调用宝塔官方编译脚本 update 8.2，目标 $vendor；可能耗时较长，安装阶段网站会短暂中断。"
+        bt_say '[进度提示] 解压后移动文件、调整权限或编译检查可能暂时无新输出。请另开 SSH 查看进程，不要并行重跑。'
         (cd "$BT_WORK" && bash ./php-vendor.sh update 8.2) || bt_die '官方更新脚本执行失败。'
     fi
     cli=$(bt_version "$BT_ROOT/bin/php") || bt_die '更新后 CLI 无法运行。'

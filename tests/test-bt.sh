@@ -34,4 +34,57 @@ expect 1 bt_vendor_version "$TESTDIR/vendor.sh"
 printf 'php_82=$(touch injected)\n' > "$TESTDIR/vendor.sh"
 expect 1 bt_vendor_version "$TESTDIR/vendor.sh"
 expect 0 test ! -e injected
+expect 0 bt_supported_os ubuntu 24.04
+expect 0 bt_supported_os debian 11
+expect 0 bt_supported_os debian 12
+expect 0 bt_supported_os debian 13
+expect 1 bt_supported_os debian 10
+expect 1 bt_supported_os rocky 9
+printf 'PHP Warning:  Module "zip" is already loaded in Unknown on line 0\n' > "$TESTDIR/diagnostics"
+expect 0 bt_diagnostics_ok "$TESTDIR/diagnostics"
+printf 'Warning: Module "zip" is already loaded in Unknown on line 0\n' > "$TESTDIR/diagnostics"
+expect 0 bt_diagnostics_ok "$TESTDIR/diagnostics"
+printf 'PHP Warning:  Module "zip" is already loaded in Unknown on line 0\nPHP Warning: Unable to load dynamic library redis.so\n' > "$TESTDIR/diagnostics"
+expect 1 bt_diagnostics_ok "$TESTDIR/diagnostics"
+printf 'PHP Fatal error: failed startup\n' > "$TESTDIR/diagnostics"
+expect 1 bt_diagnostics_ok "$TESTDIR/diagnostics"
+: > "$TESTDIR/diagnostics"
+expect 0 bt_diagnostics_ok "$TESTDIR/diagnostics"
+
+# Stub only PHP execution; exercise actual parsing of both output streams.
+timeout() {
+    case "$PHP_FIXTURE" in
+        duplicate)
+            printf '[PHP Modules]\nCore\nzip\n[Zend Modules]\n'
+            printf 'PHP Warning:  Module "zip" is already loaded in Unknown on line 0\n' >&2 ;;
+        stdout_duplicate)
+            printf 'Warning: Module "zip" is already loaded in Unknown on line 0\n[PHP Modules]\nCore\nzip\n[Zend Modules]\n' ;;
+        zip_absent)
+            printf '[PHP Modules]\nCore\n[Zend Modules]\n'
+            printf 'PHP Warning:  Module "zip" is already loaded in Unknown on line 0\n' >&2 ;;
+        broken)
+            printf '[PHP Modules]\nCore\nzip\n'
+            printf 'PHP Warning: Unable to load dynamic library redis.so\n' >&2 ;;
+        stdout_broken) printf 'Warning: Unable to load dynamic library redis.so\n[PHP Modules]\nCore\nzip\n' ;;
+        failed) return 42 ;;
+        clean) printf '[PHP Modules]\nCore\nzip\n[Zend Modules]\n' ;;
+        *) return 1 ;;
+    esac
+}
+PHP_FIXTURE=duplicate
+expect 0 bt_modules "$TESTDIR/modules" "$TESTDIR/errors"
+expect 0 test "$(cat "$TESTDIR/modules")" == $'Core\nzip'
+PHP_FIXTURE=stdout_duplicate
+expect 0 bt_modules "$TESTDIR/modules" "$TESTDIR/errors"
+expect 0 test "$(cat "$TESTDIR/modules")" == $'Core\nzip'
+PHP_FIXTURE=zip_absent
+expect 1 bt_modules "$TESTDIR/modules" "$TESTDIR/errors"
+PHP_FIXTURE=broken
+expect 1 bt_modules "$TESTDIR/modules" "$TESTDIR/errors"
+PHP_FIXTURE=stdout_broken
+expect 1 bt_modules "$TESTDIR/modules" "$TESTDIR/errors"
+PHP_FIXTURE=failed
+expect 1 bt_modules "$TESTDIR/modules" "$TESTDIR/errors"
+PHP_FIXTURE=clean
+expect 0 bt_modules "$TESTDIR/modules" "$TESTDIR/errors"
 printf 'PASS: %s BaoTa assertions (vendor updater not executed)\n' "$TOTAL"
