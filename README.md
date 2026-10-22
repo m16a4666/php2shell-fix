@@ -143,7 +143,6 @@ bash tests/test.sh
 bash tests/test-bt.sh
 bash tests/test-check.sh
 bash tests/test-lock.sh
-bash tests/test-site-check.sh
 ```
 
 测试覆盖修复版本边界、Ubuntu 回补、候选版/PPA 拒绝、CLI 已修复但 FPM 未修复、未安装核心包、软件包归属和服务发现。测试使用桩，不会在本机升级软件或重启服务。实际生产站点可用性仍需运行后确认。
