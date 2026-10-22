@@ -34,4 +34,13 @@ exec 8>&9
 bt_release_lock
 flock -n "$TESTDIR/lock" true
 exec 8>&-
+source "$ROOT/check-php2shell.sh"
+exec 8>"$TESTDIR/lock"
+flock -n 8
+P2_UNKNOWN=0
+p2_check_lock "$TESTDIR/lock"
+[[ $P2_UNKNOWN -eq 1 ]] || { printf 'FAIL: busy lock lost its unknown verdict\n' >&2; exit 1; }
+[[ ! -e /proc/$$/fd/9 ]] || { printf 'FAIL: busy-lock read descriptor leaked\n' >&2; exit 1; }
+flock -u 8
+exec 8>&-
 printf 'PASS: service FD isolation, parent lock lifetime and explicit unlock\n'

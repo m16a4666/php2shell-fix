@@ -13,3 +13,4 @@ jobs:
       - run: bash tests/test-bt.sh
       - run: bash tests/test-check.sh
       - run: bash tests/test-lock.sh
+      - run: bash tests/test-site-check.sh

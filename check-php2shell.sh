@@ -10,6 +10,9 @@ P2_UNKNOWN=0
 P2_FILES=0
 P2_LIVE=0
 P2_WEB=0
+P2_SITE=''
+P2_DOCROOT=''
+P2_PROBE_FILE=''
 declare -A P2_STATUS=() P2_PRINT=() P2_ID=() P2_CHANGED=() P2_COUNT=() P2_LIVE_BAD=() P2_FINGER=()
 declare -A P2_EXTRA=()
 
@@ -18,9 +21,91 @@ p2_unknown() { P2_UNKNOWN=1; p2_say "[无法确认] $*"; }
 p2_risk() { P2_RISK=1; p2_say "[未达修复基线] $*"; }
 p2_usage() {
     p2_say '用法：sudo bash check-php2shell.sh'
+    p2_say '      sudo bash check-php2shell.sh --site example.com --docroot /www/wwwroot/example.com'
     p2_say '只读检查 /www/server/php/* 的 CLI/FPM 文件版本和宿主机活动 PHP 进程。'
     p2_say '不会安装、修改配置、重启服务或发送网络利用请求。'
+    p2_say '--site 模式会在指定运行目录临时创建随机 PHP 探针，仅允许本机+随机令牌访问，结束时删除。'
     p2_say '退出码：0=识别范围通过；1=执行失败；2=版本未达修复基线；3=无法确认。'
+}
+p2_check_lock() {
+    local lock_path=$1
+    [[ -e $lock_path ]] || return 0
+    exec 9<"$lock_path"
+    if ! flock -sn 9; then
+        exec 9<&-
+        p2_unknown '修复锁被占用：可能正在更新，也可能是旧版服务继承了锁。继续读取版本与进程快照，不删除锁或停止服务。'
+        p2_say '[提示] 本次仍会输出各项结果，但占锁未排除前不会报告全部通过。'
+    fi
+}
+p2_valid_site() {
+    [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && $1 != *..* ]]
+}
+p2_cleanup_probe() {
+    if [[ -n $P2_PROBE_FILE ]]; then
+        if rm -f -- "$P2_PROBE_FILE"; then
+            P2_PROBE_FILE=''
+        else
+            p2_unknown "无法删除临时探针，请手动删除：$P2_PROBE_FILE"
+            return 1
+        fi
+    fi
+}
+p2_parse_site() {
+    local token=$1 body=$2 i version sapi
+    local -a lines
+    mapfile -t lines <<< "$body"
+    for (( i=0; i<${#lines[@]}; i++ )); do
+        [[ ${lines[$i]%$'\r'} == "P2S:$token" ]] || continue
+        version=${lines[$((i+1))]:-}; version=${version%$'\r'}
+        sapi=${lines[$((i+2))]:-}; sapi=${sapi%$'\r'}
+        [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*$ && $sapi =~ ^[a-z][a-z0-9_-]+$ ]] || return 1
+        printf '%s|%s\n' "$version" "$sapi"
+        return 0
+    done
+    return 1
+}
+p2_check_site() {
+    local site=$1 root=$2 token name scheme port body result version sapi grade=0
+    p2_valid_site "$site" || { p2_unknown '域名格式无效（不接受协议、路径或端口）。'; return; }
+    root=$(readlink -e -- "$root") || { p2_unknown '网站实际运行目录不存在。'; return; }
+    [[ -d $root && $root != / ]] || { p2_unknown '必须指定网站实际运行目录，不能使用 /。'; return; }
+    token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    [[ $token =~ ^[0-9a-f]{32}$ ]] || { p2_unknown '无法生成站点检查令牌。'; return; }
+    P2_PROBE_FILE=$(mktemp --tmpdir="$root" p2s-verify.XXXXXXXX.php) || { p2_unknown '无法创建临时站点探针。'; return; }
+    name=${P2_PROBE_FILE##*/}
+    # A random filename alone is insufficient: require loopback and a secret header.
+    cat > "$P2_PROBE_FILE" <<PHP
+<?php
+if (!in_array(\$_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1', '::1'], true)
+    || !hash_equals('$token', \$_SERVER['HTTP_X_P2S_VERIFY'] ?? '')) {
+    http_response_code(404); exit;
+}
+header('Content-Type: text/plain');
+header('Cache-Control: no-store, private');
+echo 'P2S:$token', "\\n", PHP_VERSION, "\\n", PHP_SAPI, "\\n";
+PHP
+    chmod 0644 "$P2_PROBE_FILE"
+    p2_say "[站点检查] $site → 本机 127.0.0.1，运行目录 $root（临时探针将删除）"
+    result=''
+    for scheme in https http; do
+        if [[ $scheme == https ]]; then port=443; else port=80; fi
+        # No redirects, proxy environment, insecure TLS, or remote target requests.
+        if body=$(curl -fsS --noproxy '*' --proto '=http,https' --connect-timeout 3 --max-time 10 --max-filesize 65536 \
+            --resolve "$site:$port:127.0.0.1" -H "X-P2S-Verify: $token" -H 'Cache-Control: no-cache' \
+            "$scheme://$site/$name" 9>&- 2>/dev/null); then
+            result=$(p2_parse_site "$token" "$body") || result=''
+            [[ -z $result ]] || break
+        fi
+    done
+    p2_cleanup_probe || return 0
+    [[ -n $result ]] || { p2_unknown "$site：没有取得带匹配令牌的 PHP 响应；请确认实际运行目录、站点绑定、TLS 和本机 80/443 监听。"; return; }
+    version=${result%%|*}; sapi=${result#*|}
+    p2_grade_version "$version" || grade=$?
+    case "$grade" in
+        0) p2_say "[站点通过] $site 本次本机源站请求实际 PHP=$version，SAPI=$sapi；探针已删除。" ;;
+        2) p2_risk "$site 实际请求返回 PHP=$version，SAPI=$sapi；探针已删除。" ;;
+        *) p2_unknown "$site 实际 PHP=$version，SAPI=$sapi，不属于已核实正式修复版本；探针已删除。" ;;
+    esac
 }
 p2_parse_version() {
     local line
@@ -172,24 +257,32 @@ p2_result() {
     return 0
 }
 p2_main() {
-    if (($#)); then
-        if (($# == 1)) && [[ $1 == --help || $1 == -h ]]; then p2_usage; return 0; fi
-        p2_usage; return 1
+    local cmd path dir branch real after
+    while (($#)); do
+        case "$1" in
+            --site) (($# >= 2)) || { p2_usage; return 1; }; P2_SITE=$2; shift 2 ;;
+            --docroot) (($# >= 2)) || { p2_usage; return 1; }; P2_DOCROOT=$2; shift 2 ;;
+            --help|-h) p2_usage; return 0 ;;
+            *) p2_usage; return 1 ;;
+        esac
+    done
+    if [[ -n $P2_SITE || -n $P2_DOCROOT ]]; then
+        [[ -n $P2_SITE && $P2_DOCROOT == /* ]] || { p2_say '--site 与绝对路径 --docroot 必须一起指定。'; return 1; }
+        p2_valid_site "$P2_SITE" || { p2_say '域名格式无效。'; return 1; }
+        for cmd in curl od tr mktemp chmod rm; do
+            command -v "$cmd" >/dev/null || { p2_say "缺少依赖：$cmd"; return 1; }
+        done
+        trap p2_cleanup_probe EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
     fi
     [[ $(uname -s) == Linux && $EUID -eq 0 ]] || { p2_say '请在 Linux 上以 root/sudo 执行。'; return 1; }
-    local cmd path dir branch real after
     for cmd in timeout awk stat readlink getconf flock; do
         command -v "$cmd" >/dev/null || { p2_say "缺少依赖：$cmd"; return 1; }
     done
-    # Use an existing lock read-only. Do not create a lock or block a live update.
-    if [[ -e /run/lock/php2shell-fix.lock ]]; then
-        exec 9</run/lock/php2shell-fix.lock
-        if ! flock -sn 9; then
-            p2_say '[无法确认] 修复锁被占用：可能正在更新，也可能是旧版更新器的锁被服务继承。'
-            p2_say '这不是更新进程仍在运行的证明。不要杀 PHP-FPM 或删除锁文件；请检查锁持有者。'
-            return 3
-        fi
-    fi
+    # Busy locks no longer hide the useful file/process evidence. Preserve unknown.
+    p2_check_lock /run/lock/php2shell-fix.lock
     p2_say "PHP2Shell 只读核验 | $(hostname) | $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
     p2_say '检查基线：8.2.35 / 8.3.36 / 8.4.27 / 8.5.12；不会安装、改配置或重启。'
     shopt -s nullglob
@@ -204,6 +297,7 @@ p2_main() {
     done
     p2_scan_processes /proc
     p2_containers
+    if [[ -n $P2_SITE ]]; then p2_check_site "$P2_SITE" "$P2_DOCROOT"; fi
     # Recheck every file after process inventory to catch concurrent replacement.
     for real in "${!P2_STATUS[@]}"; do
         if [[ ${P2_STATUS[$real]} == 0 ]]; then
